@@ -450,8 +450,8 @@ public class HttpUtils {
         ByteBuffer bodyBuffer;
         try {
             bodyBuffer = bodyBuffer(body);
-            // only write length if not chunked
-            if (!CHUNKED.equals(headers.get("Transfer-Encoding"))) {
+            // Write automatic Content-Length unless: length already provided, or chunked encoding
+            if (!headers.containsKey("Content-Length") && !CHUNKED.equals(headers.get("Transfer-Encoding"))) {
                 if (bodyBuffer != null) {
                     // trust the computed length
                     headers.putOrReplace(CONTENT_LENGTH, Integer.toString(bodyBuffer.remaining()));
