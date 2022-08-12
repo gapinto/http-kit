@@ -15,6 +15,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
+import java.security.NoSuchAlgorithmException;
+import java.security.KeyManagementException;
 import java.util.Iterator;
 import java.util.Queue;
 import java.util.Set;
@@ -164,7 +166,12 @@ public class HttpClient implements Runnable {
         keepalives.remove(key);
         // keep-alived connection, remote server close it without sending byte
         if (req.isReuseConn && req.decoder.state == READ_INITIAL) {
-            req.unrecycle();
+            for (ByteBuffer b : req.request) {
+                b.position(0); // reset for retry
+            }
+            req.isReuseConn = false;
+            req.setConnected(false); // "un"-connect this request if the keepalive conn wasn't able to be reused
+            requests.remove(req); // remove from timeout queue
             pending.offer(req); // queue for retry
             selector.wakeup();
             return true; // retry: re-open a connection to server, sent the request again
@@ -323,7 +330,7 @@ public class HttpClient implements Runnable {
 //            headers.put("Accept", "*/*");
         if (!headers.containsKey("User-Agent")) // allow override
             headers.put("User-Agent", RequestConfig.DEFAULT_USER_AGENT); // default
-        if (!headers.containsKey("Accept-Encoding") && cfg.autoCompression)
+        if (!headers.containsKey("Accept-Encoding"))
             headers.put("Accept-Encoding", "gzip, deflate"); // compression is good
 
         ByteBuffer request[];
@@ -420,15 +427,17 @@ public class HttpClient implements Runnable {
                 if (con != null) { // keep alive
                     SelectionKey key = con.key;
                     if (key.isValid()) {
+                        job.isReuseConn = true;
                         // reuse key, engine
                         try {
                             job.recycle((Request) key.attachment());
                             key.attach(job);
                             key.interestOps(OP_WRITE);
+                            requests.offer(job);
+                            job.setConnected(true); // since we're re-using a keepalive conn, set the timeout as if we're already connected
                             pending.poll();
                             return;
                         } catch (SSLException e) {
-                            job.unrecycle();
                             closeQuietly(key); // https wrap SSLException, start from fresh
                         }
                     } else {
@@ -447,13 +456,13 @@ public class HttpClient implements Runnable {
                       ch.bind(bindAddress);
                     }
                     ch.configureBlocking(false);
-                    // save key for timeout check
-                    requests.offer(job);
                     boolean connected = ch.connect(job.addr);
                     job.setConnected(connected);
                     numConnections++;
                     // if connection is established immediatelly, should wait for write. Fix #98
                     job.key = ch.register(selector, connected ? OP_WRITE : OP_CONNECT, job);
+                    // save key for timeout check
+                    requests.offer(job);
                 } catch (IOException e) {
                     job.finish(e);
                     // HttpUtils.printError("Try to connect " + job.addr, e);
